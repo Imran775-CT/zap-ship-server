@@ -39,16 +39,14 @@ async function run() {
     const paymentsCollection = db.collection("payments");
     const ridersCollection = db.collection("riders");
 
-    // ✅ custom middleware for Firebase auth
+    // ✅ Firebase auth middleware
     const verifyFBToken = async (req, res, next) => {
       const authHeader = req.headers.authorization;
-      if (!authHeader) {
+      if (!authHeader)
         return res.status(401).send({ message: "unauthorized access!" });
-      }
       const token = authHeader.split(" ")[1];
-      if (!token) {
+      if (!token)
         return res.status(401).send({ message: "unauthorized access" });
-      }
 
       try {
         const decoded = await admin.auth().verifyIdToken(token);
@@ -59,60 +57,108 @@ async function run() {
       }
     };
 
+    // ✅ 1. Search user by email
+    app.get("/users/search", async (req, res) => {
+      try {
+        const emailQuery = req.query.email;
+        if (!emailQuery) {
+          return res.status(400).send({ message: "Email query is required" });
+        }
+
+        const regex = new RegExp(emailQuery, "i"); // case-insensitive partial match
+
+        const users = await usersCollection
+          .find({ email: { $regex: regex } })
+          // .project({ email: 1, createdAt: 1, role: 1 })
+          .limit(10)
+          .toArray();
+
+        if (users.length === 0) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        res.send(users); // একসাথে সব matching user পাঠানো হচ্ছে
+      } catch (error) {
+        console.error("Error searching users:", error);
+        res.status(500).send({ message: "Failed to search user" });
+      }
+    });
+    // ✅ 2. Make user Admin
+    app.patch("/users/:id/role", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { role } = req.body;
+
+        if (!["admin", "user"].includes(role)) {
+          return res.status(400).send({ message: "Invalid role!" });
+        }
+
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role } }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: "User not found!" });
+        }
+
+        res.send({ success: true, message: `User role updated to ${role}` });
+      } catch (error) {
+        console.error("Error updating user role:", error);
+        res.status(500).send({ message: "Failed to update user role" });
+      }
+    });
+
     // ✅ Upsert User
     app.post("/users", async (req, res) => {
       const email = req.body.email;
       const userExist = await usersCollection.findOne({ email });
       if (userExist) {
-        return res.status(200).send({
-          message: "user already exist",
-          insertedId: false,
-        });
+        return res
+          .status(200)
+          .send({ message: "user already exist", insertedId: false });
       }
       const user = req.body;
       const result = await usersCollection.insertOne(user);
       res.send(result);
     });
 
-    // ✅ Search users & update admin role
+    // ✅ Search users
     app.get("/users/search", async (req, res) => {
       try {
         const emailQuery = req.query.email;
-        if (!emailQuery) {
+        if (!emailQuery)
           return res.status(400).send({ error: "Email query is required" });
-        }
 
-        const regex = new RegExp(emailQuery, "i"); // case-insensitive search
+        const regex = new RegExp(emailQuery, "i");
         const users = await usersCollection
           .find({ email: { $regex: regex } })
-          .project({ email: 1, role: 1, createdAt: 1 }) // only needed fields
+          .project({ email: 1, role: 1, createdAt: 1 })
           .limit(10)
           .toArray();
 
         res.send(users);
       } catch (err) {
-        console.error("Error searching users:", err);
+        console.error(err);
         res.status(500).send({ error: "Failed to search users" });
       }
     });
 
-    // ✅ Get all parcels OR filter by user email
+    // ✅ Parcels CRUD
     app.get("/parcels", verifyFBToken, async (req, res) => {
       try {
         const userEmail = req.query.email;
         const query = userEmail ? { created_by: userEmail } : {};
-        const options = { sort: { createdAt: -1 } };
-
-        const parcels = await parcelsCollection.find(query, options).toArray();
-
+        const parcels = await parcelsCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
         res.status(200).send(parcels);
       } catch (error) {
-        console.error("Error fetching parcels:", error);
         res.status(500).send({ message: "Failed to get parcels" });
       }
     });
 
-    // ✅ Add new parcel
     app.post("/parcels", async (req, res) => {
       try {
         const parcel = req.body;
@@ -124,7 +170,6 @@ async function run() {
       }
     });
 
-    // ✅ Get parcel by ID
     app.get("/parcels/:id", async (req, res) => {
       try {
         const id = req.params.id;
@@ -137,7 +182,6 @@ async function run() {
       }
     });
 
-    // ✅ Delete parcel by ID
     app.delete("/parcels/:id", async (req, res) => {
       try {
         const id = req.params.id;
@@ -150,78 +194,79 @@ async function run() {
       }
     });
 
-    // ✅ Add new rider
+    // ✅ Riders CRUD
     app.post("/riders", async (req, res) => {
       const rider = req.body;
       const result = await ridersCollection.insertOne(rider);
       res.send(result);
     });
-    // ✅ PATCH: Update rider status
-    app.patch("/riders/:id/status", async (req, res) => {
-      const { id } = req.params;
-      const { status, email } = req.body;
 
+    // ✅ Approve / Reject Rider
+    app.patch("/riders/:id/status", async (req, res) => {
       try {
-        // 🔹 Update rider status
+        const { id } = req.params;
+        const { status, email } = req.body; // "active" or "rejected"
+
+        if (!["active", "rejected"].includes(status)) {
+          return res.status(400).send({ message: "Invalid status value" });
+        }
+
+        // Rider update
         const result = await ridersCollection.updateOne(
           { _id: new ObjectId(id) },
           { $set: { status } }
         );
-        // update user role for accepting rider.
-        if (status === "active") {
-          const userQuery = { email };
-          const userUpdatedDoc = {
-            $set: {
-              role: "rider",
-            },
-          };
-          const roleResult = await usersCollection.updateOne(
-            userQuery,
-            userUpdatedDoc
-          );
-          console.log(roleResult.modifiedCount);
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: "Rider not found" });
         }
-        res.send({
-          message: `Rider status updated to ${status}`,
-          riderModifiedCount: result.modifiedCount,
-        });
+
+        // Update user role if approved
+        if (status === "active" && email) {
+          await usersCollection.updateOne(
+            { email },
+            { $set: { role: "rider" } }
+          );
+        }
+
+        res.send({ success: true, message: `Rider ${status} successfully` });
       } catch (error) {
-        console.error("Error updating rider status:", error);
-        res.status(500).send({ error: "Failed to update rider status" });
+        console.error(error);
+        res
+          .status(500)
+          .send({ message: "Failed to update rider status", error });
       }
     });
-
-    // ✅ Pending riders API
+    // ✅ Pending Riders
     app.get("/riders/pending", async (req, res) => {
       try {
         const pendingRiders = await ridersCollection
           .find({ status: "pending" })
+          .sort({ createdAt: -1 })
           .toArray();
         res.send(pendingRiders);
       } catch (error) {
-        console.error("Failed to load pending riders:", error);
         res.status(500).send({ message: "Failed to load pending riders" });
       }
     });
 
-    // ✅ Active Riders API (updated)
+    // ✅ Active Riders
     app.get("/riders/active", async (req, res) => {
       try {
         const activeRiders = await ridersCollection
           .find({ status: "active" })
+          .sort({ createdAt: -1 })
           .toArray();
         res.send(activeRiders);
       } catch (error) {
-        console.error("Failed to load active riders:", error);
         res.status(500).send({ message: "Failed to load active riders" });
       }
     });
 
-    // ✅ Deactivate Rider API (updated)
+    // ✅ Deactivate Rider
     app.patch("/riders/deactivate/:id", async (req, res) => {
       try {
         const riderId = req.params.id;
-
         const result = await ridersCollection.updateOne(
           { _id: new ObjectId(riderId) },
           { $set: { status: "inactive" } }
@@ -242,42 +287,16 @@ async function run() {
       }
     });
 
-    // ✅ Update rider status (approve or cancel)
-    app.patch("/riders/status/:id", async (req, res) => {
-      try {
-        const { id } = req.params;
-        const { status } = req.body; // "active" or "cancelled"
-
-        if (!["active", "cancelled"].includes(status)) {
-          return res.status(400).send({ message: "Invalid status value" });
-        }
-
-        const result = await ridersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { status } }
-        );
-
-        res.send(result);
-      } catch (error) {
-        res
-          .status(500)
-          .send({ message: "Failed to update rider status", error });
-      }
-    });
-
-    // ✅ Get all payments (protected)
+    // ✅ Payments
     app.get("/payments", verifyFBToken, async (req, res) => {
       try {
         const userEmail = req.query.email;
-        if (req.decoded.email !== userEmail) {
-          res.status(403).send({ message: "forbidden access" });
-        }
-
-        const query = userEmail ? { email: userEmail } : {};
-        const options = { sort: { createdAt: -1 } };
+        if (req.decoded.email !== userEmail)
+          return res.status(403).send({ message: "forbidden access" });
 
         const payments = await paymentsCollection
-          .find(query, options)
+          .find({ email: userEmail })
+          .sort({ createdAt: -1 })
           .toArray();
         res.send(payments);
       } catch (err) {
@@ -285,42 +304,26 @@ async function run() {
       }
     });
 
-    // ✅ Save payment + update parcel
     app.post("/payments", async (req, res) => {
       try {
         const { parcelId, transactionId, amount, email, paymentMethod } =
           req.body;
-
-        if (!parcelId || !ObjectId.isValid(parcelId)) {
+        if (!parcelId || !ObjectId.isValid(parcelId))
           return res.status(400).send({ error: "Invalid parcelId" });
-        }
-        if (!transactionId || typeof transactionId !== "string") {
-          return res.status(400).send({ error: "Invalid transactionId" });
-        }
-        if (!amount || isNaN(amount)) {
-          return res.status(400).send({ error: "Invalid amount" });
-        }
-        if (!email || typeof email !== "string") {
-          return res.status(400).send({ error: "Invalid email" });
-        }
 
-        const filter = { _id: new ObjectId(parcelId) };
-        const updateParcel = {
-          $set: {
-            payment_status: "paid",
-            paymentDate: new Date(),
-            transactionId,
-          },
-        };
-        const updateResult = await parcelsCollection.updateOne(
-          filter,
-          updateParcel
+        // Update Parcel
+        await parcelsCollection.updateOne(
+          { _id: new ObjectId(parcelId) },
+          {
+            $set: {
+              payment_status: "paid",
+              paymentDate: new Date(),
+              transactionId,
+            },
+          }
         );
 
-        if (updateResult.matchedCount === 0) {
-          return res.status(404).send({ error: "Parcel not found" });
-        }
-
+        // Save Payment
         const paymentDoc = {
           parcelId,
           email,
@@ -331,7 +334,6 @@ async function run() {
           paid_at_string: new Date().toISOString(),
           createdAt: new Date(),
         };
-
         const paymentResult = await paymentsCollection.insertOne(paymentDoc);
 
         res.send({
@@ -354,7 +356,6 @@ async function run() {
           currency: "usd",
           payment_method_types: ["card"],
         });
-
         res.send({ clientSecret: paymentIntent.client_secret });
       } catch (err) {
         res.status(500).send({ error: err.message });
